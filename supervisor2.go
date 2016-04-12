@@ -20,7 +20,7 @@ func randSeq(n int) string {
 	return string(b)
 }
 
-func tryBecameLeader(client *api.Client, checkId string) bool {
+func tryBecameLeader(client *api.Client, checkId string) (bool, string) {
 	hostname, _ := os.Hostname()
 	writeOptions := &api.WriteOptions{}
 	ngpLeader := api.KVPair{Key: "ngpleader", Value: []byte(hostname)}
@@ -35,7 +35,11 @@ func tryBecameLeader(client *api.Client, checkId string) bool {
 	if writeError != nil {
 		fmt.Println("Failed to became a leader:", writeError)
 	}
-	return writen
+	if !writen {
+		client.Session().Destroy(session, nil)
+	}
+
+	return writen, session
 }
 
 func registerCheckHandler(sessionId string, port int) string {
@@ -83,11 +87,15 @@ func main() {
 	randomSequense := randSeq(64)
 	checkId := registerSupervisorCheck(client, registerCheckHandler(randomSequense, 8081))
 	defer client.Agent().CheckDeregister(checkId)
-	isLeader := tryBecameLeader(client, checkId)
+	isLeader, session := tryBecameLeader(client, checkId)
 	fmt.Println("I am a leader: ", isLeader)
 
 	if isLeader {
 		var b []byte = make([]byte, 1)
 		os.Stdin.Read(b)
+	}
+	_, er := client.Session().Destroy(session, nil)
+	if er != nil {
+		fmt.Println("Failed clean session", er)
 	}
 }
