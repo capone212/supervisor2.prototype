@@ -9,6 +9,25 @@ import (
 	"time"
 )
 
+const (
+	// DefaultLockWaitTime is how long we block for at a time to check if lock
+	// acquisition is possible. This affects the minimum time it takes to cancel
+	// a Lock acquisition.
+	DefaultLockWaitTime = 15 * time.Second
+
+	// DefaultLockRetryTime is how long we wait after a failed lock acquisition
+	// before attempting to do the lock again. This is so that once a lock-delay
+	// is in effect, we do not hot loop retrying the acquisition.
+	DefaultLockRetryTime = 5 * time.Second
+
+	// DefaultMonitorRetryTime is how long we wait after a failed monitor check
+	// of a lock (500 response code). This allows the monitor to ride out brief
+	// periods of unavailability, subject to the MonitorRetries setting in the
+	// lock options which is by default set to 0, disabling this feature. This
+	// affects locks and semaphores.
+	DefaultMonitorRetryTime = 2 * time.Second
+)
+
 const letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
 func randSeq(n int) string {
@@ -20,26 +39,124 @@ func randSeq(n int) string {
 	return string(b)
 }
 
-func tryBecameLeader(client *api.Client, checkId string) (bool, string) {
+type LeaderSession struct {
+	// Provides ability to monitor our leadership status.
+	// Client code must listen for events and change its role
+	// as a leader or follower depending on recieved event.
+	// The true value means we became leader, false means follower.
+	// Any combination of events is possible and should be handled correctly.
+	// for example true->true->false->false->true
+	// Client should not stop listen for events when it became leader,
+	// and has to be ready to step down when false event occures in leader state.
+	statusChannel chan bool
+
+	// Leadership session. Implementation details dont use
+	session string
+	// Session check id. Implementation details dont use
+	checkId     string
+	stopChannel chan bool
+	keyName     string
+}
+
+func clean(client *api.Client, leaderSession *LeaderSession) {
+	_, er := client.Session().Destroy(leaderSession.session, nil)
+	if er != nil {
+		panic(fmt.Errorf("Failed to clean session", er))
+	}
+	er = client.Agent().CheckDeregister(leaderSession.checkId)
+	if er != nil {
+		panic(fmt.Errorf("Failed to clean check", er))
+	}
+
+	// TODO: handle stopChannel and close the both channels after that
+}
+
+func MakeLeaderElectionSession(client *api.Client) *LeaderSession {
+	result := LeaderSession{keyName: "ngpleader"}
+	randomSequense := randSeq(64)
+	// TODO: let OS choose port here, instead of using hardcoded port number
+	result.checkId = registerSupervisorCheck(client, registerCheckHandler(randomSequense, 8081))
+	var er error
+	result.session, er = createSession(client, result.checkId)
+	if er != nil {
+		// TODO: handle error
+		panic(er)
+	}
+	result.statusChannel = make(chan bool, 1)
+	// Need no buffer here becouse we need strong sync to guaranty that
+	// goroutine recieved signal and will not access shared data anymore
+	result.stopChannel = make(chan bool)
+	return &result
+}
+
+func leaderElectionProc(client *api.Client, lsession *LeaderSession) {
+	kv := client.KV()
+	qOpts := &api.QueryOptions{
+		WaitTime: DefaultLockWaitTime,
+	}
+
+	for {
+		// Check we should stop
+		select {
+		case <-lsession.stopChannel:
+			return
+		default:
+		}
+
+		// Look for an existing lock, blocking until not taken
+		pair, meta, err := kv.Get(lsession.keyName, qOpts)
+		if err != nil {
+			// TODO: handle the error
+			panic(err)
+		}
+		// Is there is a leader?
+		if pair == nil || pair.Session != "" {
+			// No leader state. It seems that we can try acquire the lock
+			pair, meta, err = tryBecameLeader(kv, lsession.session, lsession.keyName)
+			if err != nil {
+				// TODO: handle the error
+				panic(err)
+			}
+		}
+		// Is there still no leader?
+		if pair == nil || pair.Session != "" {
+			// It seems that we have lock-delay or temporary error
+			// Wait and retry
+			time.Sleep(DefaultLockRetryTime)
+			continue
+		}
+
+		// At this point there is a leader. And we know its id
+		iamLeader := false
+		if pair != nil && pair.Session == lsession.session {
+			iamLeader = true
+		}
+		if pair != nil && pair.Session != "" {
+			qOpts.WaitIndex = meta.LastIndex
+		}
+
+		// TODO: check oldvalue == newValue and report
+		lsession.statusChannel <- iamLeader
+	}
+}
+
+func tryBecameLeader(kv *api.KV, session, keyName string) (*api.KVPair, *api.QueryMeta, error) {
 	hostname, _ := os.Hostname()
-	writeOptions := &api.WriteOptions{}
-	ngpLeader := api.KVPair{Key: "ngpleader", Value: []byte(hostname)}
-	entry := &api.SessionEntry{Checks: []string{"serfHealth", checkId}}
-	session, _, sessionError := client.Session().Create(entry, writeOptions)
-	if sessionError != nil {
-		fmt.Println("Failed to acquire session", sessionError)
-	}
-	ngpLeader.Session = session
-	writen, _, writeError := client.KV().Acquire(&ngpLeader, writeOptions)
-
+	ngpLeader := api.KVPair{Key: keyName,
+		Session: session,
+		Value:   []byte(hostname)}
+	_, _, writeError := kv.Acquire(&ngpLeader, &api.WriteOptions{})
 	if writeError != nil {
-		fmt.Println("Failed to became a leader:", writeError)
-	}
-	if !writen {
-		client.Session().Destroy(session, nil)
+		return nil, nil, writeError
 	}
 
-	return writen, session
+	return kv.Get(keyName, &api.QueryOptions{})
+}
+
+func createSession(client *api.Client, checkId string) (string, error) {
+	entry := &api.SessionEntry{Checks: []string{"serfHealth", checkId}}
+	session, _, sessionError := client.Session().Create(entry, &api.WriteOptions{})
+	return session, sessionError
 }
 
 func registerCheckHandler(sessionId string, port int) string {
@@ -77,25 +194,9 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	//fmt.Println("Hello"client.Status().Leader())
-	leader, leaderError := client.Status().Leader()
-	peers, peersError := client.Status().Peers()
-
-	fmt.Println("Leader", leader, leaderError)
-	fmt.Println("Peers", peers, peersError)
-
-	randomSequense := randSeq(64)
-	checkId := registerSupervisorCheck(client, registerCheckHandler(randomSequense, 8081))
-	defer client.Agent().CheckDeregister(checkId)
-	isLeader, session := tryBecameLeader(client, checkId)
-	fmt.Println("I am a leader: ", isLeader)
-
-	if isLeader {
-		var b []byte = make([]byte, 1)
-		os.Stdin.Read(b)
-	}
-	_, er := client.Session().Destroy(session, nil)
-	if er != nil {
-		fmt.Println("Failed clean session", er)
+	leaderChannel := MakeLeaderElectionSession(client)
+	for {
+		isLeader := <-leaderChannel.statusChannel
+		fmt.Println("I am leader", isLeader)
 	}
 }
