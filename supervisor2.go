@@ -49,6 +49,7 @@ type LeaderSession struct {
 	// Client should not stop listen for events when it became leader,
 	// and has to be ready to step down when false event occures in leader state.
 	statusChannel chan bool
+	errorChannel  chan error
 
 	// Leadership session. Implementation details dont use
 	session string
@@ -59,42 +60,47 @@ type LeaderSession struct {
 }
 
 func clean(client *api.Client, leaderSession *LeaderSession) {
+	fmt.Println("Cleaning channel")
 	_, er := client.Session().Destroy(leaderSession.session, nil)
 	if er != nil {
-		panic(fmt.Errorf("Failed to clean session", er))
+		fmt.Println(fmt.Errorf("Failed to clean session %s", er))
 	}
 	er = client.Agent().CheckDeregister(leaderSession.checkId)
 	if er != nil {
-		panic(fmt.Errorf("Failed to clean check", er))
+		fmt.Println(fmt.Errorf("Failed to clean check %s", er))
 	}
-
-	// TODO: handle stopChannel and close the both channels after that
+	fmt.Println("Gracefully cleaned LeaderSession")
 }
 
-func MakeLeaderElectionSession(client *api.Client) *LeaderSession {
+func MakeLeaderElectionSession(client *api.Client) (*LeaderSession, error) {
 	result := LeaderSession{keyName: "ngpleader"}
 	randomSequense := randSeq(64)
 	// TODO: let OS choose port here, instead of using hardcoded port number
-	result.checkId = registerSupervisorCheck(client, registerCheckHandler(randomSequense, 8081))
 	var er error
+	result.checkId, er = registerSupervisorCheck(client, registerCheckHandler(randomSequense, 8081))
+	if er != nil {
+		return nil, fmt.Errorf("Failed to register supervisor check, %s", er)
+	}
 	result.session, er = createSession(client, result.checkId)
 	if er != nil {
-		// TODO: handle error
-		panic(er)
+		return nil, fmt.Errorf("Failed to create the session, %s", er)
 	}
 	result.statusChannel = make(chan bool, 1)
 	// Need no buffer here becouse we need strong sync to guaranty that
 	// goroutine recieved signal and will not access shared data anymore
 	result.stopChannel = make(chan bool)
-	return &result
+	result.errorChannel = make(chan error)
+
+	go leaderElectionProc(client, &result)
+	return &result, nil
 }
 
 func leaderElectionProc(client *api.Client, lsession *LeaderSession) {
+	defer clean(client, lsession)
 	kv := client.KV()
 	qOpts := &api.QueryOptions{
 		WaitTime: DefaultLockWaitTime,
 	}
-
 	for {
 		// Check we should stop
 		select {
@@ -103,23 +109,29 @@ func leaderElectionProc(client *api.Client, lsession *LeaderSession) {
 		default:
 		}
 
+		fmt.Println("Checking key %s with waitIndex %s", lsession.keyName, qOpts.WaitIndex)
+
 		// Look for an existing lock, blocking until not taken
 		pair, meta, err := kv.Get(lsession.keyName, qOpts)
 		if err != nil {
-			// TODO: handle the error
-			panic(err)
+			lsession.errorChannel <- fmt.Errorf("Failed to get KeyValue %s", err)
+			return
 		}
 		// Is there is a leader?
-		if pair == nil || pair.Session != "" {
+		if pair == nil || pair.Session == "" {
+			fmt.Println("No leader. Attemt to became")
+
 			// No leader state. It seems that we can try acquire the lock
 			pair, meta, err = tryBecameLeader(kv, lsession.session, lsession.keyName)
 			if err != nil {
-				// TODO: handle the error
-				panic(err)
+				lsession.errorChannel <- fmt.Errorf("tryBecameLeader returned error %s", err)
+				return
 			}
 		}
 		// Is there still no leader?
-		if pair == nil || pair.Session != "" {
+		if pair == nil || pair.Session == "" {
+			fmt.Println("Sleeping lock delay")
+
 			// It seems that we have lock-delay or temporary error
 			// Wait and retry
 			time.Sleep(DefaultLockRetryTime)
@@ -134,7 +146,6 @@ func leaderElectionProc(client *api.Client, lsession *LeaderSession) {
 		if pair != nil && pair.Session != "" {
 			qOpts.WaitIndex = meta.LastIndex
 		}
-
 		// TODO: check oldvalue == newValue and report
 		lsession.statusChannel <- iamLeader
 	}
@@ -168,35 +179,69 @@ func registerCheckHandler(sessionId string, port int) string {
 	return fmt.Sprintf("http://127.0.0.1:%d/%s", port, sessionId)
 }
 
-func registerSupervisorCheck(client *api.Client, checkUrl string) string {
+func registerSupervisorCheck(client *api.Client, checkUrl string) (string, error) {
 	fmt.Println("registring check for url", checkUrl)
 	const SUPERVISOR_SERVICE_ID = "supervisor2"
 	const SUPERVISOR_CHEK_ID = "supervisor2_check"
 	agent := client.Agent()
-	agent.CheckDeregister(SUPERVISOR_CHEK_ID)
+	err := agent.CheckDeregister(SUPERVISOR_CHEK_ID)
+	if err != nil {
+		fmt.Println(fmt.Errorf("Failed deregister supervisor check %s", err))
+	}
 	check := api.AgentCheckRegistration{ID: SUPERVISOR_CHEK_ID,
 		Name:      SUPERVISOR_CHEK_ID,
 		ServiceID: SUPERVISOR_SERVICE_ID}
 	check.HTTP = checkUrl
 	check.Interval = "1s"
 	check.Status = "passing"
-	e := agent.CheckRegister(&check)
-	if e != nil {
-		fmt.Println("Failed register supervisor check")
-		panic(e)
+	err = agent.CheckRegister(&check)
+	if err != nil {
+		return "", fmt.Errorf("Failed register supervisor check %s", err)
 	}
-	return SUPERVISOR_CHEK_ID
+	return SUPERVISOR_CHEK_ID, nil
+}
+
+func charChannel() chan byte {
+	result := make(chan byte)
+	f := func() {
+		var b []byte = make([]byte, 1)
+		for {
+			os.Stdin.Read(b)
+			result <- b[0]
+		}
+	}
+	go f()
+	return result
 }
 
 func main() {
 	fmt.Println("HelloWorld!")
 	client, err := api.NewClient(api.DefaultConfig())
 	if err != nil {
-		panic(err)
+		panic(fmt.Errorf("Failed to create api client %s", err))
 	}
-	leaderChannel := MakeLeaderElectionSession(client)
+
+	keyboard := charChannel()
+	var lsession *LeaderSession = nil
 	for {
-		isLeader := <-leaderChannel.statusChannel
-		fmt.Println("I am leader", isLeader)
+		if err != nil || lsession == nil {
+			fmt.Println("Reinit connection")
+			lsession, err = MakeLeaderElectionSession(client)
+			if err != nil {
+				time.Sleep(DefaultMonitorRetryTime)
+				continue
+			}
+		}
+		select {
+		case isLeader := <-lsession.statusChannel:
+			fmt.Println("I am leader", isLeader)
+		case err = <-lsession.errorChannel:
+			fmt.Println("Error recived %s", err)
+		case ch := <-keyboard:
+			if ch == 'q' || ch == 'Q' {
+				fmt.Println("Exit requested")
+				return
+			}
+		}
 	}
 }
