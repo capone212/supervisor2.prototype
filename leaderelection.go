@@ -1,4 +1,4 @@
-package supervisor2
+package main
 
 import (
 	"fmt"
@@ -116,7 +116,7 @@ func leaderElectionProc(client *api.Client, lsession *LeaderSession) {
 		default:
 		}
 
-		fmt.Println("Checking key %s with waitIndex %s", lsession.keyName, qOpts.WaitIndex)
+		fmt.Printf("Checking key %s with waitIndex %d\n", lsession.keyName, qOpts.WaitIndex)
 
 		// Look for an existing lock, blocking until not taken
 		pair, meta, err := kv.Get(lsession.keyName, qOpts)
