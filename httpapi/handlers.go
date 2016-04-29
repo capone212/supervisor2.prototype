@@ -3,9 +3,23 @@ package httpapi
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 )
+
+func sendJson(w http.ResponseWriter, msg interface{}) {
+	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+	w.WriteHeader(http.StatusOK)
+	jsonData, err := json.MarshalIndent(msg, "", "    ")
+	if err != nil {
+		panic(err)
+	}
+	_, err = w.Write(jsonData)
+	if err != nil {
+		log.Printf("Failed to write json: %s", err)
+	}
+}
 
 func Index(w http.ResponseWriter, r *http.Request) error {
 	fmt.Fprintf(w, "Hello, %q", r.URL.Path)
@@ -27,12 +41,7 @@ func ListInterfaces(w http.ResponseWriter, r *http.Request) error {
 			}
 		}
 	}
-
-	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
-	w.WriteHeader(http.StatusOK)
-	if err = json.NewEncoder(w).Encode(ipv4List); err != nil {
-		panic(err)
-	}
+	sendJson(w, ipv4List)
 	return nil
 }
 
@@ -46,10 +55,7 @@ func ListAgentMembers(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
-	w.WriteHeader(http.StatusOK)
-	if err := json.NewEncoder(w).Encode(members); err != nil {
-		panic(err)
-	}
+
+	sendJson(w, members)
 	return err
 }
