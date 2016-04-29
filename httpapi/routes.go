@@ -34,4 +34,16 @@ var routes = Routes{
 		"/config/cluster",
 		ListAgentMembers,
 	},
+	Route{
+		"Join Cluster Member",
+		"PUT",
+		"/config/cluster",
+		JoinAgentMember,
+	},
+	Route{
+		"Force Leave Cluster Member",
+		"DELETE",
+		"/config/cluster",
+		ForceLeaveAgentMember,
+	},
 }

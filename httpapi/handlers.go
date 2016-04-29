@@ -59,3 +59,45 @@ func ListAgentMembers(w http.ResponseWriter, r *http.Request) error {
 	sendJson(w, members)
 	return err
 }
+
+func JoinAgentMember(w http.ResponseWriter, r *http.Request) error {
+	type addressToJoin struct {
+		Address string `json:"address"`
+	}
+	client, err := GetConsulClient()
+	if err != nil {
+		return err
+	}
+	addr := addressToJoin{}
+	err = json.NewDecoder(r.Body).Decode(&addr)
+	if err != nil {
+		return err
+	}
+	err = JoinConsulAgent(client, addr.Address)
+	if err != nil {
+		return err
+	}
+	w.WriteHeader(http.StatusOK)
+	return nil
+}
+
+func ForceLeaveAgentMember(w http.ResponseWriter, r *http.Request) error {
+	type nodeToLeave struct {
+		Name string `json:"name"`
+	}
+	client, err := GetConsulClient()
+	if err != nil {
+		return err
+	}
+	node := nodeToLeave{}
+	err = json.NewDecoder(r.Body).Decode(&node)
+	if err != nil {
+		return err
+	}
+	err = ForceLeaveConsulAgent(client, node.Name)
+	if err != nil {
+		return err
+	}
+	w.WriteHeader(http.StatusOK)
+	return nil
+}

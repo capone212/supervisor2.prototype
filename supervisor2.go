@@ -17,6 +17,15 @@ func listMembers(client *api.Client) {
 	}
 }
 
+/*
+------------------- TODO LIST ---------------------
+- Implement join
+- Implement Leave
+- Implement clean -> go to uninitialized state
+- Implement Init -> go to initialized state from uinintialized
+---------------------------------------------------
+*/
+
 func main() {
 	fmt.Println("HelloWorld!")
 	client, err := api.NewClient(api.DefaultConfig())

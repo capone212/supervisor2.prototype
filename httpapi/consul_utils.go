@@ -23,9 +23,21 @@ func GetConsulAgents(client *api.Client) ([]MemberAgent, error) {
 	}
 	result := make([]MemberAgent, 0)
 	for _, m := range members {
+		status := serf.MemberStatus(m.Status)
+		if status == serf.StatusLeaving || status == serf.StatusLeft {
+			continue
+		}
 		// TODO: return status not just bool value
-		available := serf.MemberStatus(m.Status) == serf.StatusAlive
+		available := status == serf.StatusAlive
 		result = append(result, MemberAgent{m.Name, m.Addr, available})
 	}
 	return result, nil
+}
+
+func JoinConsulAgent(client *api.Client, address string) error {
+	return client.Agent().Join(address, false)
+}
+
+func ForceLeaveConsulAgent(client *api.Client, nodename string) error {
+	return client.Agent().ForceLeave(nodename)
 }
