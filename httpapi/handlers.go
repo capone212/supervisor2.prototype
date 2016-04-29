@@ -7,15 +7,15 @@ import (
 	"net/http"
 )
 
-func Index(w http.ResponseWriter, r *http.Request) {
+func Index(w http.ResponseWriter, r *http.Request) error {
 	fmt.Fprintf(w, "Hello, %q", r.URL.Path)
+	return nil
 }
 
-func ListInterfaces(w http.ResponseWriter, r *http.Request) {
+func ListInterfaces(w http.ResponseWriter, r *http.Request) error {
 	interfcaes, err := net.InterfaceAddrs()
 	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		fmt.Fprintf(w, "Error, %s", err)
+		return err
 	}
 	// Get ipv4 address list
 	var ipv4List = make([]string, 0)
@@ -33,23 +33,23 @@ func ListInterfaces(w http.ResponseWriter, r *http.Request) {
 	if err = json.NewEncoder(w).Encode(ipv4List); err != nil {
 		panic(err)
 	}
+	return nil
 }
 
-type MemberAgent struct {
-	HostName string `json:"hostName"`
-	Address  string `json:"address"`
-	// TODO: rename to status and give more choise
-	Avail bool `json:"avail"`
-}
-
-func ListAgentMembers(w http.ResponseWriter, r *http.Request) {
-	members := []MemberAgent{
-		MemberAgent{"capone-hp", "192.168.1.2", true},
-		MemberAgent{"dnk", "192.168.22.11", false},
+func ListAgentMembers(w http.ResponseWriter, r *http.Request) error {
+	client, err := GetConsulClient()
+	if err != nil {
+		return err
+	}
+	var members []MemberAgent
+	members, err = GetConsulAgents(client)
+	if err != nil {
+		return err
 	}
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 	w.WriteHeader(http.StatusOK)
 	if err := json.NewEncoder(w).Encode(members); err != nil {
 		panic(err)
 	}
+	return err
 }

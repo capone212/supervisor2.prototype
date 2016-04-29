@@ -4,11 +4,13 @@ import (
 	"net/http"
 )
 
+type HttpHandlerFunc func(http.ResponseWriter, *http.Request) error
+
 type Route struct {
 	Name        string
 	Method      string
 	Pattern     string
-	HandlerFunc http.HandlerFunc
+	HandlerFunc HttpHandlerFunc
 }
 
 type Routes []Route

@@ -1,8 +1,20 @@
 package httpapi
 
 import (
+	"fmt"
 	"github.com/gorilla/mux"
+	"net/http"
 )
+
+func makeErrorCheckedHandler(fn HttpHandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		err := fn(w, r)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			fmt.Fprintf(w, "Error: %s", err)
+		}
+	}
+}
 
 func NewRouter() *mux.Router {
 
@@ -12,7 +24,7 @@ func NewRouter() *mux.Router {
 			Methods(route.Method).
 			Path(route.Pattern).
 			Name(route.Name).
-			Handler(route.HandlerFunc)
+			Handler(makeErrorCheckedHandler(route.HandlerFunc))
 	}
 
 	return router
