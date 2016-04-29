@@ -23,11 +23,19 @@ func main() {
 	if err != nil {
 		panic(fmt.Errorf("Failed to create api client %s", err))
 	}
+
+	//--------- HTTP api test
+
+	RunHttp()
+
+	//------------------ List mebers
 	for {
 		listMembers(client)
 		fmt.Println("--------------")
 		time.Sleep(time.Second * 3)
 	}
+
+	// Leader election
 
 	keyboard := charChannel()
 	var lsession *LeaderSession = nil
